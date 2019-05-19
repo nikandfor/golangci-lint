@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 
 	"github.com/golangci/golangci-lint/pkg/lint/linter"
+	"github.com/golangci/golangci-lint/pkg/logutils"
 	"github.com/golangci/golangci-lint/pkg/result"
 )
 
@@ -23,6 +25,11 @@ func (Scopelint) Desc() string {
 func (lint Scopelint) Run(ctx context.Context, lintCtx *linter.Context) ([]result.Issue, error) {
 	var res []result.Issue
 
+	infos := make([]*types.Info, len(lintCtx.Packages))
+	for i, p := range lintCtx.Packages {
+		infos[i] = p.TypesInfo
+	}
+
 	for _, f := range lintCtx.ASTCache.GetAllValidFiles() {
 		n := Node{
 			fset:          f.Fset,
@@ -30,6 +37,8 @@ func (lint Scopelint) Run(ctx context.Context, lintCtx *linter.Context) ([]resul
 			unsafeObjects: map[*ast.Object]struct{}{},
 			skipFuncs:     map[*ast.FuncLit]struct{}{},
 			issues:        &res,
+			infos:         infos,
+			debugf:        logutils.Debug("scopelint"),
 		}
 		ast.Walk(&n, f.F)
 	}
@@ -46,6 +55,8 @@ type Node struct {
 	unsafeObjects map[*ast.Object]struct{}
 	skipFuncs     map[*ast.FuncLit]struct{}
 	issues        *[]result.Issue
+	infos         []*types.Info
+	debugf        logutils.DebugFunc
 }
 
 // Visit method is invoked for each node encountered by Walk.
@@ -53,6 +64,7 @@ type Node struct {
 // of node with the visitor w, followed by a call of w.Visit(nil).
 //nolint:gocyclo,gocritic
 func (f *Node) Visit(node ast.Node) ast.Visitor {
+outer:
 	switch typedNode := node.(type) {
 	case *ast.ForStmt:
 		switch init := typedNode.Init.(type) {
@@ -89,6 +101,16 @@ func (f *Node) Visit(node ast.Node) ast.Visitor {
 	case *ast.Ident:
 		if _, obj := f.dangerObjects[typedNode.Obj]; obj {
 			// It is the naked variable in scope of range statement.
+			tp := f.Info(typedNode)
+			switch tp := tp.(type) {
+			case *types.Basic:
+				info := tp.Info()
+				if info&^types.IsConstType == 0 {
+					f.debugf("Skip var %v of type %T (%+v)", typedNode, tp, tp)
+					break outer
+				}
+			}
+			f.debugf("Using range scope variable %v of type %T (%v)", typedNode, tp, tp)
 			f.errorf(node, "Using the variable on range scope %s in function literal", formatCode(typedNode.Name, nil))
 			break
 		}
@@ -115,10 +137,22 @@ func (f *Node) Visit(node ast.Node) ast.Visitor {
 				unsafeObjects: f.unsafeObjects,
 				skipFuncs:     f.skipFuncs,
 				issues:        f.issues,
+				infos:         f.infos,
+				debugf:        f.debugf,
 			}
 		}
 	}
 	return f
+}
+
+func (f *Node) Info(n ast.Expr) (t types.Type) {
+	for _, info := range f.infos {
+		t = info.TypeOf(n)
+		if t != nil {
+			return t
+		}
+	}
+	return
 }
 
 // The variadic arguments may start with link and category types,

@@ -216,6 +216,7 @@ func (m Manager) GetAllSupportedLinterConfigs() []*linter.Config {
 			WithSpeed(8).
 			WithURL("https://github.com/alexkohler/prealloc"),
 		linter.NewConfig(golinters.Scopelint{}).
+			WithTypeInfo().
 			WithPresets(linter.PresetBugs).
 			WithSpeed(8).
 			WithURL("https://github.com/kyoh86/scopelint"),
